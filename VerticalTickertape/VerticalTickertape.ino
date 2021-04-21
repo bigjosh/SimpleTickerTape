@@ -18,7 +18,7 @@
 
 #define COLOR_R 0x00                                          
 #define COLOR_G 0x00                                          
-#define COLOR_B 0x40     
+#define COLOR_B 0x40    
 //#define COLOR_W 0x00     // Uncomment this line if you are using RGBW LED strips
 
 
@@ -1255,7 +1255,7 @@ void setup() {
   // Show something on startup so we know it is working
   // (you can delete this branding if you are that kind of person)
   
-  appendStringToBuffer( "SimpleTickertape\nfrom JOSH.COM\n" );
+  appendStringToBuffer( "\nSimpleTickertape\nfrom\nJOSH.COM\n\n" );
 
 }
 
