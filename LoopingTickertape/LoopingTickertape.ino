@@ -915,26 +915,43 @@ void show() {
 byte buffer[ BUFFER_SIZE ];
 
 unsigned bufferHead =0;     // Add new chars here
+unsigned bufferTail =0;     // So we can discard new bytes if buffer overflows (I think this is better than overwriting, right?)
+
+boolean looping=false;     // Are we currently looping?
+unsigned currentLoopStart =0;      // Where the current looped message starts
+unsigned nextLoopStart =0; 
 
 // Add a byte to the end of the buffer. Siliently discards byte if buffer already full. 
 
-void inline appendBuffer( const byte b ) {
-  
-    buffer[ bufferHead++ ] = b;
-
-    if (bufferHead==BUFFER_SIZE) {
-      bufferHead = 0; 
-    }
-
-  }
-  
+void inline appendBuffer( const byte b ) {   
+   
+   if (b == '\r' || b=='\n' ) {              // Start looping with the most recently entered message?
+      
+      if (!looping) {                        // If we are already looping, then ignore a new empty message
+         currentLoopStart=nextLoopStart;
+         nextLoopStart=bufferHead;
+         looping=true;    
+      }
+      
+   } else {
+      
+      unsigned newBufferHead = bufferHead+1;
+      if (newBufferHead==BUFFER_SIZE) newBufferHead=0;
+      if (newBufferHead!=bufferTail) {
+         buffer[ bufferHead ] = b;
+         bufferHead=newBufferHead;
+         looping=false;    // if we got a new byte then stop current loooping         
+      }
+   }
+   
 }
 
 // Set the whole buffer to spaces so it does not look ugly
 
 void initBuffer() {
-for( byte b : buffer )  {
-  b = ' ';
+  for( unsigned i=0; i<BUFFER_SIZE;i++ )  {
+    buffer[i]= ' ';
+  }
 }
 
 void appendStringToBuffer( const char *s ) {
@@ -961,7 +978,7 @@ byte inline serialRead() {
 
 // Read any pending serial bytes into the buffer
 
-void serialPollRX() {
+void inline serialPollRX() {
 
   if (serialReady()) {
     appendBuffer( serialRead());    
@@ -1011,88 +1028,83 @@ static inline void sendCol( byte colBits  ) {
 
 // Send a full batch of data out to the LEDs
 
-// buffer to an array of bytes that should be displayed. count is the number of bytes in that array to display. 
+// Display the bytes from buffer. The byte at pos will is shown at the rightmost position,
+// pos-1 in the next rightmost position, etc until all the pixels in the display is filled. 
+// col is the starting col to show. col=0 will show the leftmost col of the rightmost positon, 
+// col=7 will show the entire rightmost letter. 
 
-// The bytes are painted onto the display in left to right order starting with display_pos until all pixels on the display are full. 
-// If the supplied message is too short to fill the display then it is repeated.
+// Returns the leftmost byte that was actually displayed (even if just one col)
 
-// display_shift will shift the display `display_shift` columns to the left. By shifting through we can smooth scroll it across the width of the char. 
-// when display_shift=0 that means start at col 0, which means send the full char width of the first char.
-
-// Explained differently, we will start drawing the leftmost letter starting at the display_pos column.
-
-// Returns index of the letter that would be displayed at the next column past the end of the display, so 
-// if a letter was, saym partially scrolled out and cut off at the right side of the display then then index of that
-// letter would be returned. If, however, the rightmost letter had been completely displayed then the return value
-// would be the index of the letter that would have been shown next to it on the right.
-
-
-// Scroll in the bytes in to buffer starting at index p. Display will end up with pos displayed in the far right position,
-// b-1 in the next rightmost position, etc until the display is filled. 
-// col is the starting col to show. 0 will show the leftmost col of the rightmost positon, etc.
+// (Why do we go backwartds and then forwards? Becuase I am not smart enough to get the math right to treat everything
+// as backwards all the time. FIst is make it work, second is make it fast. If this ends up being too slow for big signs
+// then we can optimize it.)
 
 boolean updateLEDs( const unsigned pos, const byte col ) {
 
   // Becuase of the way the LEDs work, we have to send the leftmost pixels first
-  // So first we have to figure out where in the buffer that is.
-
-  // 9876543210
-
-  unsigned xright = 0;
-  unsigned xleft = PIXEL_COUNT-1;
-
-  unsigned 
-
-  unsigned p = pos - (PIXEL_COUNT/FONT_WIDTH)
+  // So first we have to figure out where in the buffer that is. For simplicity, we will
+  // iteratively back up our way there.
   
-
-
-  
-  unsigned pixel_count = PIXEL_COUNT;  // How many pixels left to fill on the display?
-          
-  // Loop through each pixel of the display and output one column of data
-
-  while (pixel_count) {
-
-      byte c = buffer[p];         // get next character to display
-
-      byte font_index = c -ASCII_OFFSET;     // The letter in the font of the current byte to display
-      
-      sendCol( pgm_read_byte_near( &fontdata[font_index ][display_shift] ) );    // The column in the font of the current letter (read from PROGMEM)
+  unsigned p = pos;
+  unsigned c = col;
     
-      pixel_count--;
-      // We could test tixel_count==0 here to be slightly more efficient, but maybe the compiler will do it for us?
-      display_shift++;
+  for( unsigned x = 0; x < PIXEL_COUNT ; x++ ) {
+        
+    if (c) {
+      
+      c--;
+      
+    } else {
+      
+      c=FONT_WIDTH-1;
+      
+      if (p) {
+        p--;
+      } else {
+        p=BUFFER_SIZE-1;
+      }
+      
+    }
+        
+  }
+  
+  // OK, now p and c point to the letter can column of the leftmost row of pixels to put on the screen.
 
-      if (display_shift==FONT_WIDTH) {       // Finished with this letter?
+  const unsigned leftmostp = p;     // Remember the leftmost for later
+
+  // Now actually output the pixels to the display in left to right order
+
+  for( unsigned x = 0; x < PIXEL_COUNT ; x++ ) {
+    
+      const byte b = buffer[p];         // get next character to display
+
+      const byte font_index = b -ASCII_OFFSET;     // The letter in the font of the current byte to display
+      
+      sendCol( pgm_read_byte_near( &fontdata[font_index ][c] ) );    // The column in the font of the current letter (read from PROGMEM)
+
+      c++;
+
+      if (c==FONT_WIDTH) {       // Finished with this letter?
 
         // Move on to next letter
 
-        display_shift=0;       
-        display_pos++;
+        c=0;
+        p++;
 
-        if (display_pos==buffer_count) {
-          display_pos=0;        
+        if (p==BUFFER_SIZE) {
+          p=0;        
         }
       }
 
-  } else {
-
-      //if nothing to send, then send blank column of pixels      
-      sendCol( 0x00 );    
-
-    }    
-
-  }
-          
+  }       
+  
   // Latch everything we just sent into the pixels so it is actually displayed
   show();
 
-  // Return next char to be output at the end of the display
-  return display_pos==0;
+  // Return the leftmost byte that was actually displayed
+  return leftmostp;
 
 }
-
 
 
 void setup() {
@@ -1135,14 +1147,14 @@ void setup() {
   // (you can delete this branding if you are that kind of person)
   
 //  appendStringToBuffer( "SimpleTickertape from JOSH.COM |" );
-  appendStringToBuffer( "JOSH LEVINE is very nice" );
+  appendStringToBuffer( "01234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ" );
 
 }
 
 // Keep track of the the current leftmost displayed spot in the buffer
 
-unsigned display_start = 0;
-byte display_shift = 0;       // How many pixels into the leftmost char are we
+unsigned displayStart = 0;
+byte displayShift = 0;       // How many pixels into the leftmost char are we
 
 void loop() {  
 
@@ -1154,80 +1166,23 @@ void loop() {
     _delay_us(900);   // Pool just often enough that we do not miss any serial bytes at 9600bd (1 byte about 1ms) 
     serialPollRX();    
   }
-
-  // Send out the signals to the LEDs
-
-  boolean updateComplete = updateLEDs( buffer , buffer_count , display_start , display_shift );
-
-  // If the next letter to be shown was a message terminator, then if that terminator is new, 
-  // then there is potentially a new, now-orpaned message that we can purge to make room in the buffer
-  // for the next message
-
-  if (updateComplete && (buffer_count>2 && buffer[buffer_count-1]==MESSAGE_TERMINATOR )) {  
-
-      // Search back to see if there is a previous message we can now remove from the buffer
-
-      unsigned i = buffer_count-1;   
-
-      while (i>0) {    // Scan back looking for a previous message
-      
-        i--;           // We can dsafely do -1 here since we checked that lastPos>0 above
-        
-        if (buffer[i]==MESSAGE_TERMINATOR) {    // We found a previous message marker
-
-          //  Everything prior to this position is now orphaned so we should remove it from the buffer
-
-          i++;    // Skip forward past the terminator we just found since we do not want to keep it
-
-          unsigned currentMessageLen = buffer_count-i;    
-
-          // Copy the most recent message down so that it now starts at position 0 (covering the next oldest message)
-
-          // POS   : 0123456789
-          // BEFORE: JKL|NOPQR|   (len=10)
-          // AFTER : NOPQR|       (len=6)
-
-          for( unsigned i = 0; i < currentMessageLen ; i++) {
-            buffer[i]=buffer[i+i];
-          }
-
-          // Adjust everyting
-
-          unsigned deletedCount = buffer_count - currentMessageLen;
-          display_start -= deletedCount;                  
-          buffer_count = currentMessageLen;
-
-          // I know this is ugly, but can you think of a better way? Is `prevMessagePos=0` better? Requireds an extra compare.
-          break;          
-          
-        } // if (buffer[i]==MESSAGE_TERMINATOR)
-      }   
-    }
-  }
-
-  // If there are unshown letters at the end of the current string or if we are currently inside a loopping message...
-  if (!updateComplete || (buffer_count>0 && buffer[buffer_count-1]==MESSAGE_TERMINATOR ) ) {
-    // ... then we should keep scrolling
+  
+  if (displayStart!=bufferHead) {
+    const unsigned lastDisplayByte = updateLEDs( displayStart , displayShift );
     
-    // Shift  everything 1 pixel to the left to make the scroll movement
-    display_shift++;
-
-    // If shifting gets us to the end of the current char, then we move everything forward by one char
-
-    if (display_shift== FONT_WIDTH) {
-
-      display_shift = 0 ;
-      display_start++;
-
-      if ( display_start == buffer_count ) {      // We are done showing what is in the buffer
-
-        // So recycle back
-        display_start = 0; 
-
-      } 
-
+    displayShift++;
+    
+    if (displayShift==FONT_WIDTH) {
+      displayShift=0;
+      displayStart++;
+      if (displayStart==BUFFER_SIZE) {
+        displayStart=0;
+      }
+      
     }
     
   }
   
+  
+  return;  
 }
