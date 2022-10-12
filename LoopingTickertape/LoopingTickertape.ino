@@ -918,8 +918,10 @@ unsigned bufferHead =0;     // Add new chars here
 unsigned bufferTail =0;     // So we can discard new bytes if buffer overflows (I think this is better than overwriting, right?)
 
 boolean looping=false;     // Are we currently looping?
-unsigned currentLoopStart =0;      // Where the current looped message starts
+unsigned loopStart =0;      // Where the current looped message starts
 unsigned nextLoopStart =0; 
+
+// Note that we do not need a loop end  since the loop will always end at the most recently recieved byte
 
 // Add a byte to the end of the buffer. Siliently discards byte if buffer already full. 
 
@@ -928,7 +930,7 @@ void inline appendBuffer( const byte b ) {
    if (b == '\r' || b=='\n' ) {              // Start looping with the most recently entered message?
       
       if (!looping) {                        // If we are already looping, then ignore a new empty message
-         currentLoopStart=nextLoopStart;
+         loopStart=nextLoopStart;
          nextLoopStart=bufferHead;
          looping=true;    
       }
@@ -1092,7 +1094,12 @@ boolean updateLEDs( const unsigned pos, const byte col ) {
         p++;
 
         if (p==BUFFER_SIZE) {
-          p=0;        
+          
+          if (looping) {
+            p=loopStart;
+          } else {
+            p=0;        
+          }
         }
       }
 
@@ -1180,6 +1187,14 @@ void loop() {
       }
       
     }
+    
+  } else {    //displayStart==bufferHead so we have shown everything in the buffer, should we loop around?
+  
+    if (looping) {
+      
+      displayStart = loopStart;
+      
+    }    
     
   }
   
