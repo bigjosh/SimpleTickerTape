@@ -1,4 +1,4 @@
-// Creates a looping ticker tape using WS2812B Neopixel strips. 
+// Creates a simplified scrolling ticker tape using WS2812B Neopixel strips. 
 // You should have 7 LED strips with the "Data In" pin for each connected to the D1-D7 pins on an Arduino Uno. (They also need power and ground connections)
 // The Arduino listens for text on its built in serial port at 960bd,n,8,1 and then scrolls it out on the LEDs. It uses a buffer to the scrolling speed can be smoothed out.
 // To send the serial data, you can connect the Arduino to a computer via USB and then use the Arduino Serial Monitor. Set the monitor to 9600 and "No Line Ending".
@@ -6,7 +6,7 @@
 // You can also connect other serial devices like a bluetooth HC-05 to the RX pin on the Arduino. 
 // For more info see the full article at http://wp.josh.com/Build-a-giant-scrolling-ticker-tape-from-WS2812B-Neopixels-and-an-Arduino-Uno
 
-// Change this to be at least as long as your pixel string (too long will work fine, just will be a little slower)
+// Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
 
 #define PIXEL_COUNT 60      // Length of the strings in pixels. I am using a 1 meter long strings that have 60 LEDs per meter. 
 
@@ -21,10 +21,6 @@
 #define COLOR_G 0x00                                          
 #define COLOR_B 0x00     
 //#define COLOR_W 0x00     // Uncomment this line if you are using RGBW LED strips
-
-// This defines the end of a message for looping. Send this at the end of a message to make it loop.
-
-#define MESSAGE_TERMINATOR '|'
 
 /*------------------- FONT CUT TOP HERE -------------------------------*/
 
@@ -908,84 +904,42 @@ void show() {
 
 
 // Must be big enough to hold serial data coming in while we are showing a message on the LEDs
-// Also must be big enough to hold a full display worth of data, so BUFFER_SIZE * FONT_WIDTH >= PIXEL_COUNT.
 
 #define BUFFER_SIZE 1000
 
 byte buffer[ BUFFER_SIZE ];
 
-unsigned bufferHead =0;     // Add new chars here
-unsigned bufferTail =0;     // So we can discard new bytes if buffer overflows (I think this is better than overwriting, right?)
-
-boolean looping=false;     // Are we currently looping?
-unsigned loopStart =0;      // Where the current looped message starts
-unsigned nextLoopStart =0; 
-
-// Note that we do not need a loop end  since the loop will always end at the most recently recieved byte
+volatile unsigned buffer_len = 0;      // Number of bytes currently in buffer
 
 // Add a byte to the end of the buffer. Siliently discards byte if buffer already full. 
 
-void inline appendBuffer( const byte b ) {   
-   
-   if (b == '\r' || b=='\n' ) {              // Start looping with the most recently entered message?
-      
-      if (!looping) {                        // If we are already looping, then ignore a new empty message
-         loopStart=nextLoopStart;
-         nextLoopStart=bufferHead;
-         looping=true;    
-      }
-      
-   } else {
-      
-      unsigned newBufferHead = bufferHead+1;
-      if (newBufferHead==BUFFER_SIZE) newBufferHead=0;
-      if (newBufferHead!=bufferTail) {
-         buffer[ bufferHead ] = b;
-         bufferHead=newBufferHead;
-         looping=false;    // if we got a new byte then stop current loooping         
-      }
-   }
-   
-}
+void inline appendToBuffer( const byte b ) {
 
-// Set the whole buffer to spaces so it does not look ugly
-
-void initBuffer() {
-  for( unsigned i=0; i<BUFFER_SIZE;i++ )  {
-    buffer[i]= ' ';
+  if ( buffer_len < BUFFER_SIZE ) {
+    buffer[ buffer_len++ ] = b;
   }
+  
 }
+
 
 void appendStringToBuffer( const char *s ) {
 
   while (*s) {
-    appendBuffer( *s );
+    appendToBuffer( *s );
     s++;
   }
   
 }
 
-// Is there a byte ready to be read from the serial port?
 
-boolean inline serialReady() {
-  return (UCSR0A & _BV(RXC0) ) != 0;
-  
-}
-
-// Read the next pending byte from the serial port (check to make sure one is ready before reading)
-
-byte inline serialRead() {
-  return UDR0;
-}
-
-// Read any pending serial bytes into the buffer
+// Check if a byte is available from the serial port. If so, read it and add it to the buffer. 
 
 void inline serialPollRX() {
-
-  if (serialReady()) {
-    appendBuffer( serialRead());    
+  
+  if (UCSR0A & _BV(RXC0) ) {      // If there is a byte ready in the recieve buffer
+    appendToBuffer( UDR0 );       // Read it and add to our buffer. Note reading the byte clears the RXC0 flag
   }
-
+  
 }
 
 // Send a byte of color data out the pins to the LED strings
@@ -1030,88 +984,65 @@ static inline void sendCol( byte colBits  ) {
 
 // Send a full batch of data out to the LEDs
 
-// Display the bytes from buffer. The byte at pos will is shown at the rightmost position,
-// pos-1 in the next rightmost position, etc until all the pixels in the display is filled. 
-// col is the starting col to show. col=0 will show the leftmost col of the rightmost positon, 
-// col=7 will show the entire rightmost letter. 
+// s points to an array of bytes that should be displayed. len is the number of bytes in that array to display. 
 
-// Returns the leftmost byte that was actually displayed (even if just one col)
+// shift will shift the display `shift` columns to the left. By shifting through we can smooth scroll it across the width of the char. 
+// when shift=0 that means start at col 0, which means send the full char width of the first char.
 
-// (Why do we go backwartds and then forwards? Becuase I am not smart enough to get the math right to treat everything
-// as backwards all the time. FIst is make it work, second is make it fast. If this ends up being too slow for big signs
-// then we can optimize it.)
+// Returns true if there is more left in the buffer that did not fit on the display.
 
-boolean updateLEDs( const unsigned pos, const byte col ) {
+byte updateLEDs( const byte *s , unsigned len , byte shift ) {
+ 
+  unsigned pixel_count = PIXEL_COUNT;  // How many pixels left to fill on the display?
 
-  // Becuase of the way the LEDs work, we have to send the leftmost pixels first
-  // So first we have to figure out where in the buffer that is. For simplicity, we will
-  // iteratively back up our way there.
-  
-  unsigned p = pos;
-  unsigned c = col;
-    
-  for( unsigned x = 0; x < PIXEL_COUNT ; x++ ) {
-        
-    if (c) {
-      
-      c--;
+  byte font_col =0;     // What column of the current font char are we currently on? 
+
+  while (len && pixel_count) {
+
+    if (shift) {
+
+      // Use up all the shift columns without actually sending them to the display
+      shift--;
       
     } else {
+
+      byte font_index = (*s) -ASCII_OFFSET;     // The letter in the font of the current byte to display
       
-      c=FONT_WIDTH-1;
-      
-      if (p) {
-        p--;
-      } else {
-        p=BUFFER_SIZE-1;
-      }
-      
+      sendCol( pgm_read_byte_near( &fontdata[font_index ][font_col] ) );    // The column in the font of the current letter (read from PROGMEM)
+      pixel_count--;
+
     }
-        
-  }
-  
-  // OK, now p and c point to the letter can column of the leftmost row of pixels to put on the screen.
 
-  const unsigned leftmostp = p;     // Remember the leftmost for later
+    font_col++;
 
-  // Now actually output the pixels to the display in left to right order
+    if (font_col==FONT_WIDTH) {       // Finished with this letter?
 
-  for( unsigned x = 0; x < PIXEL_COUNT ; x++ ) {
-    
-      const byte b = buffer[p];         // get next character to display
+      // Move on to next letter
 
-      const byte font_index = b -ASCII_OFFSET;     // The letter in the font of the current byte to display
+      font_col=0;       
       
-      sendCol( pgm_read_byte_near( &fontdata[font_index ][c] ) );    // The column in the font of the current letter (read from PROGMEM)
+      s++;
+      len--;
 
-      c++;
+    }
 
-      if (c==FONT_WIDTH) {       // Finished with this letter?
+  }
+       
 
-        // Move on to next letter
+  // If the display is longer than the string, fill any remaining pixels with blanks
 
-        c=0;
-        p++;
-
-        if (p==BUFFER_SIZE) {
-          
-          if (looping) {
-            p=loopStart;
-          } else {
-            p=0;        
-          }
-        }
-      }
-
-  }       
-  
+  while (pixel_count--) {
+    sendCol(  0  );    // All pixels in column off               
+  }
+    
   // Latch everything we just sent into the pixels so it is actually displayed
   show();
 
-  // Return the leftmost byte that was actually displayed
-  return leftmostp;
-
+  return len>0;     // If len>0 then we ran out of pixels before we ran out of message to display
 }
+
+
+
 
 
 void setup() {
@@ -1131,13 +1062,13 @@ void setup() {
 
   // This blinking signal seems to reset some stuck pixels and leaves all outputs cleanly low
   PIXEL_PORT |= 0xff;       // Set all outputs to 1
-  delay( 500);
+  delay( 100);
   PIXEL_PORT &= ~0xff;      // Set all outputs to 0
-  delay( 500);
+  delay( 100);
   PIXEL_PORT |= 0xff;       // Set all outputs to 1
-  delay( 500);
+  delay( 100);
   PIXEL_PORT &= ~0xff;      // Set all outputs to 0
-  delay( 500);
+  delay( 100);
 
 
   // Turn off interrupts, forever. For now on we are repsonsible for polling the incoming serial data.
@@ -1147,57 +1078,60 @@ void setup() {
   
   cli();
 
-  // Set the buffer to spaces so it does not look ugly. 
-  initBuffer(); 
-
   // Show something on startup so we know it is working
   // (you can delete this branding if you are that kind of person)
   
-//  appendStringToBuffer( "SimpleTickertape from JOSH.COM |" );
-  appendStringToBuffer( "01234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ" );
+  appendStringToBuffer( "SimpleTickertape from JOSH.COM " );
 
 }
 
-// Keep track of the the current leftmost displayed spot in the buffer
-
-unsigned displayStart = 0;
-byte displayShift = 0;       // How many pixels into the leftmost char are we
+// Shift keeps track of how many columns shifted over the display currently is. By shifting one column at a 
+// time, we can smoothly scroll text across the display.
+byte shift = 0;
 
 void loop() {  
 
   // Delay so text does not scroll to quickly...
   // Remeber we can not use millis() here since interrupts are permenetly off
-  // We also have to manually keep checking the serial RX so that it does not overflow
+  // We also have to manually keep checking the serial RX so that it doe snot overflow
 
   for( unsigned i=0;i < FRAME_DELAY_MS ; i++ ) {
     _delay_us(900);   // Pool just often enough that we do not miss any serial bytes at 9600bd (1 byte about 1ms) 
-    serialPollRX();    
+    serialPollRX();
   }
-  
-  if (displayStart!=bufferHead) {
-    const unsigned lastDisplayByte = updateLEDs( displayStart , displayShift );
-    
-    displayShift++;
-    
-    if (displayShift==FONT_WIDTH) {
-      displayShift=0;
-      displayStart++;
-      if (displayStart==BUFFER_SIZE) {
-        displayStart=0;
+
+  // Send out the signals to the LEDs
+
+  byte more_flag = updateLEDs( buffer , buffer_len , shift );
+
+  if (more_flag) {
+
+    // If there is more of the buffer to display, then we shift over one column before the next update to smooth scroll forward
+
+    shift++;
+
+    // If shifting gets us to the end of the current char, then we move everything forward by one char
+
+    if (shift== FONT_WIDTH) {
+
+      shift = 0 ;
+
+      buffer_len--;
+
+      // Shift the buffer to the left 1 full char 
+      // Note we can not use `memmove()` for this becuase it takes too long and we might drop serial chars while it is running
+      // so we do it manyally so we can keep pooling the serial port the whole time. 
+      
+      for( unsigned i =0; i < buffer_len ; i++ ) {
+          
+          buffer[i] = buffer[i+1];
+          serialPollRX();
+        
       }
       
     }
     
-  } else {    //displayStart==bufferHead so we have shown everything in the buffer, should we loop around?
-  
-    if (looping) {
-      
-      displayStart = loopStart;
-      
-    }    
-    
   }
   
-  
-  return;  
+
 }
