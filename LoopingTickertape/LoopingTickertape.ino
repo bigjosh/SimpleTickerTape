@@ -1,10 +1,17 @@
-// Creates a simplified scrolling ticker tape using WS2812B Neopixel strips. 
+// Creates a looping  scrolling ticker tape using WS2812B Neopixel strips. 
 // You should have 7 LED strips with the "Data In" pin for each connected to the D1-D7 pins on an Arduino Uno. (They also need power and ground connections)
 // The Arduino listens for text on its built in serial port at 960bd,n,8,1 and then scrolls it out on the LEDs. It uses a buffer to the scrolling speed can be smoothed out.
-// To send the serial data, you can connect the Arduino to a computer via USB and then use the Arduino Serial Monitor. Set the monitor to 9600 and "No Line Ending".
-// Type stuff in the top bar and press enter and watch it scroll out on the LEDs. 
+// To send the serial data, you can connect the Arduino to a computer via USB and then use the Arduino Serial Monitor. Set the monitor to 9600.
 // You can also connect other serial devices like a bluetooth HC-05 to the RX pin on the Arduino. 
 // For more info see the full article at http://wp.josh.com/Build-a-giant-scrolling-ticker-tape-from-WS2812B-Neopixels-and-an-Arduino-Uno
+
+// In this looping version, normally text will scroll across the sign as it it recieved from the serial port. If you send a carrige return or line feed, 
+// then the current message will start to loop over and over again until more data is recieved. 
+
+// Note that if you make a message that is shorter than the full display and then send another looping message, the display will jump to the new message
+// without scrolling. This is becuase the arduino really does not have enough memory to hold the full display and you could, say, have a whole bunch of very
+// short messages in a row and we would have to have some path memory to know how to coherently display these. If you always want things to look smooth, then
+// you can add a bunch of spaces to the end of each message to fill the display and force the old message to scrooll off before the new message starts. 
 
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
 
@@ -1041,29 +1048,8 @@ boolean updateLEDs( unsigned start , unsigned end , byte col ) {
         // Note that this means that we never return true if looping is on, which is right since
         // we want to keep looping. 
         if (looping) {
-          
-          // So if we get here then the looping message just completed a loop so we know that we can now delete any old 
-          // message still in the buffer. Note that this will cause a jump in the case of a looped message that is shorter than 
-          
-          // If we did not do this, then eventually the buffer would fill up with old messages.
-          
-          if (loopStart>buffer) {
-            // Copy the whole looped message down to the beginging of the buffer
-            
-            unsigned loopLen = buffer_len - loopStart;
-            
-            for( unsigned i=0; i<loopLen; i++) {
-              buffer[i] = buffer[loopStart+i];              
-            }
-            
-            // ..and adjust pointers accordingly
-            loopStart=0;
-            buffer_len=loopLen;            
-            
-          }
-          
-          x=loopStart;   
-          
+                  
+          x=loopStart;             
                  
         }
         
@@ -1166,6 +1152,27 @@ void loop() {
       pos++;
       
       if (looping && pos==buffer_len) {
+
+          // So if we get here then the looping message just completed a loop so we know that we can now delete any old 
+          // message still in the buffer. Note that this will cause a jump in the case of a looped message that is shorter than 
+          
+          // If we did not do this, then eventually the buffer would fill up with old messages.
+          
+          if (loopStart>0) {
+            // Copy the whole looped message down to the beginging of the buffer
+            
+            unsigned loopLen = buffer_len - loopStart;
+            
+            for( unsigned i=0; i<loopLen; i++) {
+              buffer[i] = buffer[loopStart+i];              
+            }
+            
+            // ..and adjust pointers accordingly
+            loopStart=0;
+            buffer_len=loopLen;            
+            
+          }        
+        
         pos=loopStart;
       }
       
@@ -1173,5 +1180,4 @@ void loop() {
     
   } 
   
-
 }
