@@ -909,16 +909,34 @@ void show() {
 
 byte buffer[ BUFFER_SIZE ];
 
-volatile unsigned buffer_len = 0;      // Number of bytes currently in buffer
+unsigned buffer_len = 0;      // Number of bytes currently in buffer
+
+unsigned loopStart=0;         // Where does the current loop start?
+
+boolean looping=false;        // Are we currently looping? 
 
 // Add a byte to the end of the buffer. Siliently discards byte if buffer already full. 
 
 void inline appendToBuffer( const byte b ) {
-
-  if ( buffer_len < BUFFER_SIZE ) {
-    buffer[ buffer_len++ ] = b;
-  }
   
+  if ( b=='\r' || b=='\n') {     // CR or LF signal to start looping
+  
+    if (!looping) {
+      looping=true;
+    }
+    
+  } else {
+
+    if ( buffer_len < BUFFER_SIZE ) {
+      
+      if (looping) {      // If we get a new char while looping, stop looping and remember this is the start of the next loop
+        looping=false;
+        loopStart=buffer_len;
+      }
+      
+      buffer[ buffer_len++ ] = b;
+    }
+  }
 }
 
 
@@ -991,54 +1009,81 @@ static inline void sendCol( byte colBits  ) {
 
 // Returns true if there is more left in the buffer that did not fit on the display.
 
-byte updateLEDs( const byte *s , unsigned len , byte shift ) {
+boolean updateLEDs( unsigned start , unsigned end , byte col ) {
+  
+  unsigned x=start;
+  unsigned c=col;
  
   unsigned pixel_count = PIXEL_COUNT;  // How many pixels left to fill on the display?
 
-  byte font_col =0;     // What column of the current font char are we currently on? 
+  while (x<end && pixel_count) {
+    
+    byte b = buffer[x];
 
-  while (len && pixel_count) {
+    byte font_index = b -ASCII_OFFSET;     // The letter in the font of the current byte to display
+    
+    sendCol( pgm_read_byte_near( &fontdata[font_index ][c] ) );    // The column in the font of the current letter (read from PROGMEM)
+    pixel_count--;
 
-    if (shift) {
+    c++;
 
-      // Use up all the shift columns without actually sending them to the display
-      shift--;
-      
-    } else {
-
-      byte font_index = (*s) -ASCII_OFFSET;     // The letter in the font of the current byte to display
-      
-      sendCol( pgm_read_byte_near( &fontdata[font_index ][font_col] ) );    // The column in the font of the current letter (read from PROGMEM)
-      pixel_count--;
-
-    }
-
-    font_col++;
-
-    if (font_col==FONT_WIDTH) {       // Finished with this letter?
+    if (c==FONT_WIDTH) {       // Finished with this letter?
 
       // Move on to next letter
 
-      font_col=0;       
+      c=0;       
       
-      s++;
-      len--;
-
+      x++;
+      
+      if (x==end) {
+        
+        // This will make the looped message repeat multipule times if it is shorter than the display
+        // Note that this means that we never return true if looping is on, which is right since
+        // we want to keep looping. 
+        if (looping) {
+          
+          // So if we get here then the looping message just completed a loop so we know that we can now delete any old 
+          // message still in the buffer. Note that this will cause a jump in the case of a looped message that is shorter than 
+          
+          // If we did not do this, then eventually the buffer would fill up with old messages.
+          
+          if (loopStart>buffer) {
+            // Copy the whole looped message down to the beginging of the buffer
+            
+            unsigned loopLen = buffer_len - loopStart;
+            
+            for( unsigned i=0; i<loopLen; i++) {
+              buffer[i] = buffer[loopStart+i];              
+            }
+            
+            // ..and adjust pointers accordingly
+            loopStart=0;
+            buffer_len=loopLen;            
+            
+          }
+          
+          x=loopStart;   
+          
+                 
+        }
+        
+      }      
+      
     }
 
   }
        
-
+       
   // If the display is longer than the string, fill any remaining pixels with blanks
 
   while (pixel_count--) {
     sendCol(  0  );    // All pixels in column off               
-  }
-    
+  
+  }  
   // Latch everything we just sent into the pixels so it is actually displayed
   show();
 
-  return len>0;     // If len>0 then we ran out of pixels before we ran out of message to display
+  return x<end;     // Did we display full message? Did we end ot the end of the buffer?
 }
 
 
@@ -1081,13 +1126,15 @@ void setup() {
   // Show something on startup so we know it is working
   // (you can delete this branding if you are that kind of person)
   
-  appendStringToBuffer( "SimpleTickertape from JOSH.COM " );
+  appendStringToBuffer( "SimpleTickertape from JOSH.COM\rloop\r" );
 
 }
 
 // Shift keeps track of how many columns shifted over the display currently is. By shifting one column at a 
 // time, we can smoothly scroll text across the display.
-byte shift = 0;
+
+unsigned pos=0;   // What char in the buffer should be at the leftmost part of the display?
+byte col = 0;     // What column of the leftmost char shoudl be at the leftmost of the display?
 
 void loop() {  
 
@@ -1102,36 +1149,29 @@ void loop() {
 
   // Send out the signals to the LEDs
 
-  byte more_flag = updateLEDs( buffer , buffer_len , shift );
+  boolean more_flag = updateLEDs( pos , buffer_len , col );
 
   if (more_flag) {
 
     // If there is more of the buffer to display, then we shift over one column before the next update to smooth scroll forward
 
-    shift++;
+    col++;
 
     // If shifting gets us to the end of the current char, then we move everything forward by one char
 
-    if (shift== FONT_WIDTH) {
+    if (col== FONT_WIDTH) {
 
-      shift = 0 ;
-
-      buffer_len--;
-
-      // Shift the buffer to the left 1 full char 
-      // Note we can not use `memmove()` for this becuase it takes too long and we might drop serial chars while it is running
-      // so we do it manyally so we can keep pooling the serial port the whole time. 
+      col = 0 ;
       
-      for( unsigned i =0; i < buffer_len ; i++ ) {
-          
-          buffer[i] = buffer[i+1];
-          serialPollRX();
-        
+      pos++;
+      
+      if (looping && pos==buffer_len) {
+        pos=loopStart;
       }
       
     }
     
-  }
+  } 
   
 
 }
