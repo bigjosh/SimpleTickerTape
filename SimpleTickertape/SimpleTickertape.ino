@@ -7,16 +7,15 @@
 // For more info see the full article at http://wp.josh.com/Build-a-giant-scrolling-ticker-tape-from-WS2812B-Neopixels-and-an-Arduino-Uno
 
 // Change this to be at least as long as your pixel string (too long will work fine, just be a little slower)
-
 #define PIXEL_COUNT 60      // Length of the strings in pixels. I am using a 1 meter long strings that have 60 LEDs per meter. 
 
-
+// Make this bigger to slow down the scroll speed. 
 #define FRAME_DELAY_MS 50    // Max time in ms for each frame while scrolling. Lower numbers make for faster scrolling (until we run out of speed).
                            // Note that we automatically start speeding up when the buffer starts getting full and then slow down again when it starts getting empty. 
 
 
 // Define the color we will send for on pixels. Each value is a byte 0-255. 
-
+// These values result in a dim red, which should be relatively low power. 
 #define COLOR_R 0x40                                          
 #define COLOR_G 0x00                                          
 #define COLOR_B 0x00     
@@ -931,7 +930,6 @@ void appendStringToBuffer( const char *s ) {
   
 }
 
-
 // Check if a byte is available from the serial port. If so, read it and add it to the buffer. 
 
 void inline serialPollRX() {
@@ -982,16 +980,17 @@ static inline void sendCol( byte colBits  ) {
   
 }
 
-// Send a full batch of data out to the LEDs
+// Send a full batch of data out to the LEDs. 
 
 // s points to an array of bytes that should be displayed. len is the number of bytes in that array to display. 
 
-// shift will shift the display `shift` columns to the left. By shifting through we can smooth scroll it across the width of the char. 
-// when shift=0 that means start at col 0, which means send the full char width of the first char.
+// The oldest byte in the buffer is sent first so appears closest to the Arduino on the string. 
 
-// Returns true if there is more left in the buffer that did not fit on the display.
+// shift will shift the display `shift` columns towards the Arduino. By shifting through we can smooth scroll it across the width of the char. 
+// when shift=0 that means start at col 0, which means send the full char width of the first char. If shift=1 then the leftmost col of the 
+// oldst char in the buffer will not be displayed, and instead the second column of the oldest char will show up in first pixel closest to the Arduino. 
 
-byte updateLEDs( const byte *s , unsigned len , byte shift ) {
+void updateLEDs( const byte *s , unsigned len , byte shift ) {
  
   unsigned pixel_count = PIXEL_COUNT;  // How many pixels left to fill on the display?
 
@@ -1030,6 +1029,7 @@ byte updateLEDs( const byte *s , unsigned len , byte shift ) {
        
 
   // If the display is longer than the string, fill any remaining pixels with blanks
+  // This only potentially happens at startup before we have enough text in to fill the display. 
 
   while (pixel_count--) {
     sendCol(  0  );    // All pixels in column off               
@@ -1038,10 +1038,7 @@ byte updateLEDs( const byte *s , unsigned len , byte shift ) {
   // Latch everything we just sent into the pixels so it is actually displayed
   show();
 
-  return len>0;     // If len>0 then we ran out of pixels before we ran out of message to display
 }
-
-
 
 
 
@@ -1091,26 +1088,30 @@ byte shift = 0;
 
 void loop() {  
 
-  // Delay so text does not scroll to quickly...
-  // Remeber we can not use millis() here since interrupts are permenetly off
-  // We also have to manually keep checking the serial RX so that it doe snot overflow
+  // Delay so text does not scroll too quickly...
+  // Remeber we can not use millis() here since interrupts are permenently off
+  // We also have to manually keep checking the serial RX so that it does not overflow
 
   for( unsigned i=0;i < FRAME_DELAY_MS ; i++ ) {
-    _delay_us(900);   // Pool just often enough that we do not miss any serial bytes at 9600bd (1 byte about 1ms) 
+    _delay_us(900);   // Poll just often enough that we do not miss any serial bytes at 9600bd (1 byte about every 1ms) 
     serialPollRX();
   }
 
   // Send out the signals to the LEDs
 
-  byte more_flag = updateLEDs( buffer , buffer_len , shift );
+  updateLEDs( buffer , buffer_len , shift );
 
-  if (more_flag) {
 
+  // Check to see if we need to scroll.
+  unsigned pixels_in_buffer = buffer_len * FONT_WIDTH;
+
+  if (pixels_in_buffer > PIXEL_COUNT ) {
+    
     // If there is more of the buffer to display, then we shift over one column before the next update to smooth scroll forward
 
     shift++;
 
-    // If shifting gets us to the end of the current char, then we move everything forward by one char
+    // If shifting gets us to the end of the current char, then we move everything forward by one char and discard the oldest char in the buffer. 
 
     if (shift== FONT_WIDTH) {
 
@@ -1120,7 +1121,7 @@ void loop() {
 
       // Shift the buffer to the left 1 full char 
       // Note we can not use `memmove()` for this becuase it takes too long and we might drop serial chars while it is running
-      // so we do it manyally so we can keep pooling the serial port the whole time. 
+      // so we do it manually so we can keep pooling the serial port the whole time. 
       
       for( unsigned i =0; i < buffer_len ; i++ ) {
           
@@ -1133,5 +1134,4 @@ void loop() {
     
   }
   
-
 }
